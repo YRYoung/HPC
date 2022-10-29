@@ -5,64 +5,81 @@ from scipy.sparse import coo_matrix
 import math
 
 param = 1000
-N=100
-
+N = 100
 t_per_block = 20  # <=32
-block_per_grid = int(np.ceil((N + 1) / t_per_block))
+block_per_grid = int(math.ceil((N + 1) / t_per_block))
 nelements = ((N - 1) ** 2 + N - 1) * 4 + (N + 1) * 3 - 2
+
+total_t_per_block = t_per_block ** 2
 
 
 @cuda.jit
-def generate_tem_mat(N, row_col, data, f):
-    # row, column, data
-    local_row_col = cuda.shared.array((2, t_per_block ** 2), numba.int64)
-    local_data = cuda.shared.array((1, t_per_block ** 2), numba.float32)
-    local_count = cuda.shared.array((1), numba.uint16)
+def generate_tem_mat_cuda(N, rows, cols, data, f):
+    total = total_t_per_block
+
+    local_row = cuda.shared.array(shape=total, dtype=numba.int64)
+    local_col = cuda.shared.array(shape=total, dtype=numba.int64)
+    local_data = cuda.shared.array(shape=total, dtype=numba.float32)
+
+    local_count = cuda.shared.array(shape=1, dtype=numba.int64)
+
+    global_count = 0
 
     tx = cuda.threadIdx.x
     ty = cuda.threadIdx.y
     px, py = cuda.grid(2)
-    if px > N or py > N: return
 
     cuda.syncthreads()
-
-    location = numba.int32(py * (N + 1) + px)
-    if px == 0 or px == N or py == 0:
-        local_row_col[:, local_count] = [location, location]
-        local_data[location] = 1.
-
-        f[location] = 10 if i == 0 or i == N else 0
-        local_count += 1
-
+    if px > N or py > N:
+        pass
     else:
-        local_row_col[:, local_count:local_count + 4] = [
-            [location, location, location, location],
-            [location - (N + 2), location - (N + 1), location - N, location]]
-        local_data[:, local_count:local_count + 4] = [-N / param,
-                                                      -1 + N / (param / 2),
-                                                      -N / param,
-                                                      1.]
 
-        f[location] = 0
-        local_count += 4
+        location = py * (N + 1) + px
+
+        if px == 0 or px == N or py == 0:
+            local_row[local_count[0]] = location
+            local_col[local_count[0]] = location
+            local_data[location] = 1.
+
+            # f[location] = 10 if px == 0 or px == N else 0
+            local_count[0] += 1
+
+        else:
+            for i in range(4):
+                local_row[local_count[0] + i] = location
+
+                local_row[local_count[0] + i] = location if i == 3 else location - (N + 2) + i
+
+            local_data[local_count[0]] = local_data[local_count[0] + 2] = -N / param
+            local_data[local_count[0] + 1] = -1 + N / (param / 2)
+            local_data[local_count[0] + 3] = 1.
+
+            # f[location] = 0
+            local_count[0] += 4
 
     cuda.syncthreads()
 
-    local_row_col = local_row_col[:local_count]
-    row_col = np.hstack([row_col, local_row_col])
+    # for i in range(local_count[0]):
 
-    local_data = local_data[:local_count]
-    data = np.hstack([data, local_data])
+    #     rows[global_count + i] = local_row[i]
+    #     cols[global_count + i] = local_col[i]
+    #     data[global_count + i] = local_data[i]
+
+    # global_count += local_count[0]
+    # print(global_count)
 
 
-row_col = np.zeros((2, nelements), dtype=np.int64)
-data = np.zeros((1, nelements), dtype=np.float32)
+rows = np.zeros(shape=nelements, dtype=np.int64)
+cols = np.zeros(nelements, dtype=np.int64)
 
+data = np.zeros(nelements, dtype=np.float32)
 f = np.zeros((N + 1) ** 2, dtype=np.float32)
 
-generate_tem_mat[(block_per_grid, block_per_grid), (t_per_block, t_per_block)](
-    N, row_col, data, f)
+blocks = (block_per_grid, block_per_grid)
+threads = (t_per_block, t_per_block)
+print('blocks/grid: {}\nthreads/block: {}'.format(block_per_grid, t_per_block))
 
-A = coo_matrix((result[2, :], (result[0, :], result[1, :])),
+generate_tem_mat_cuda[(block_per_grid, block_per_grid), (t_per_block, t_per_block)](N, rows, cols, data, f)
+
+A = coo_matrix((data, (rows, cols)),
                shape=((N + 1) ** 2, (N + 1) ** 2)).tocsr()
-#%%
